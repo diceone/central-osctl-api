@@ -1,0 +1,12 @@
+[Unit]
+Description=Central OSCTL API Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/central-osctl-api
+Restart=on-failure
+Environment=GOMAXPROCS=4
+
+[Install]
+WantedBy=multi-user.target
