@@ -4,10 +4,12 @@ The `central-osctl-api` is a central orchestrator API that manages and interacts
 
 ## Features
 
-- **Register `osctl` API clients**
+- **Register `osctl` API clients** with URL validation
 - **Deregister `osctl` API clients**
 - **List registered `osctl` API clients**
-- **Proxy requests to `osctl` API clients**
+- **Proxy requests to `osctl` API clients** with query parameter filtering
+- **Persistent client storage** via JSON file
+- **Optional API key authentication** for secure access
 
 ## Installation
 
@@ -32,13 +34,21 @@ The `central-osctl-api` is a central orchestrator API that manages and interacts
 
 ### Running the Central API
 
-1. **Run the Central API**
+1. **Configure Environment Variables (Optional)**
+
+   ```sh
+   export PORT=12001                      # Server port (default: 12001)
+   export PERSISTENCE_FILE=clients.json   # Client storage file (default: clients.json)
+   export API_KEY=your-secret-key         # Enable authentication (optional)
+   ```
+
+2. **Run the Central API**
 
    ```sh
    ./central-osctl-api
    ```
 
-2. **Verify the Server is Running**
+3. **Verify the Server is Running**
 
    The server will run on port `12001` by default:
 
@@ -50,18 +60,28 @@ The `central-osctl-api` is a central orchestrator API that manages and interacts
 
 ### Register a Client
 
-Register a new `osctl` API client.
+Register a new `osctl` API client. If API key authentication is enabled, include the `X-API-Key` header.
 
 ```sh
-curl -X POST -H "Content-Type: application/json" -d '{"id": "client1", "api_url": "http://localhost:12000", "username": "admin", "password": "password"}' http://localhost:12001/register
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-secret-key" \
+  -d '{"id": "client1", "api_url": "http://localhost:12000", "username": "admin", "password": "password"}' \
+  http://localhost:12001/register
 ```
+
+**Note**: The `api_url` must be a valid HTTP or HTTPS URL. Invalid URLs will be rejected at registration time.
 
 ### Deregister a Client
 
 Deregister an existing `osctl` API client.
 
 ```sh
-curl -X POST -H "Content-Type: application/json" -d '{"id": "client1"}' http://localhost:12001/unregister
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-secret-key" \
+  -d '{"id": "client1"}' \
+  http://localhost:12001/unregister
 ```
 
 ### List Clients
@@ -74,11 +94,36 @@ curl http://localhost:12001/clients
 
 ### Proxy a Request
 
-Proxy a request to a specific `osctl` API client.
+Proxy a request to a specific `osctl` API client. Additional query parameters (except `client_id` and `path`) are forwarded to the target API.
 
 ```sh
 curl -X GET "http://localhost:12001/proxy?client_id=client1&path=/ram"
 ```
+
+Example with additional query parameters:
+
+```sh
+curl -X GET "http://localhost:12001/proxy?client_id=client1&path=/ram&sort=asc&limit=10"
+# Forwards to: http://localhost:12000/ram?sort=asc&limit=10
+```
+
+## Configuration
+
+The `central-osctl-api` can be configured using environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|----------|
+| `PORT` | Server port | `12001` |
+| `PERSISTENCE_FILE` | JSON file for storing registered clients | `clients.json` |
+| `API_KEY` | API key for authentication (optional) | None (authentication disabled) |
+
+### Security
+
+**API Key Authentication**: When `API_KEY` is set, all `/register` and `/unregister` requests must include an `X-API-Key` header with the correct key.
+
+**Client Persistence**: Registered clients are saved to `clients.json` (or the file specified by `PERSISTENCE_FILE`) and automatically loaded on startup. The file is created with `0600` permissions (owner read/write only).
+
+**URL Validation**: Client API URLs are validated at registration time and must be valid HTTP or HTTPS URLs.
 
 ## Systemd Service
 
@@ -102,6 +147,9 @@ To run the `central-osctl-api` as a systemd service:
    ExecStart=/usr/local/bin/central-osctl-api
    Restart=on-failure
    Environment=GOMAXPROCS=4
+   Environment=PORT=12001
+   Environment=PERSISTENCE_FILE=/var/lib/central-osctl-api/clients.json
+   Environment=API_KEY=your-secret-key-here
 
    [Install]
    WantedBy=multi-user.target
@@ -142,6 +190,14 @@ go build -o central-osctl-api
 Run the project locally:
 
 ```sh
+./central-osctl-api
+```
+
+With configuration:
+
+```sh
+export API_KEY=test-key
+export PERSISTENCE_FILE=dev-clients.json
 ./central-osctl-api
 ```
 
