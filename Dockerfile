@@ -32,6 +32,11 @@ WORKDIR /data
 # Expose port 12001 to the outside world
 EXPOSE 12001
 
+# Health probe against the default port; override HEALTHCMD when PORT changes.
+ENV HEALTHCHECK_PORT=12001
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget -q -O /dev/null "http://127.0.0.1:${HEALTHCHECK_PORT}/healthz" || exit 1
+
 USER app
 
 CMD ["/usr/local/bin/central-osctl-api"]
