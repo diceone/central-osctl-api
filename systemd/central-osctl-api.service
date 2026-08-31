@@ -1,12 +1,22 @@
 [Unit]
 Description=Central OSCTL API Service
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/central-osctl-api
 Restart=on-failure
+DynamicUser=yes
+StateDirectory=central-osctl-api
 Environment=GOMAXPROCS=4
+Environment=PORT=12001
+Environment=PERSISTENCE_FILE=/var/lib/central-osctl-api/clients.json
+# Authentication is disabled unless API_KEY is set. Override via
+# `systemctl edit central-osctl-api` - do not commit real keys here.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/central-osctl-api
 
 [Install]
 WantedBy=multi-user.target

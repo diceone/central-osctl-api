@@ -20,37 +20,37 @@ curl -X POST http://localhost:12001/register \
   -H "X-API-Key: your-secret-key" \
   -d '{"id":"client1","api_url":"http://localhost:8080","username":"admin","password":"secret"}'
 
-# 3. List registered clients
-curl http://localhost:12001/clients
+# 3. List registered clients (requires X-API-Key when API_KEY is set; passwords are never returned)
+curl -H "X-API-Key: your-secret-key" http://localhost:12001/clients
 
 # 4. Proxy a request to the registered client
-curl "http://localhost:12001/proxy?client_id=client1&path=/status"
+curl -H "X-API-Key: your-secret-key" "http://localhost:12001/proxy?client_id=client1&path=/status"
 ```
 
 ## Key Components
 
 - **CentralAPI struct**: Holds registered clients in a `map[string]OsctlClient` with mutex-protected concurrent access
 - **OsctlClient struct**: Represents a downstream API with `ID`, `ApiURL`, `Username`, `Password` (Basic Auth)
-- **Four HTTP endpoints**:
+- **Four HTTP endpoints** (each enforces its HTTP method and, when `API_KEY` is set, requires the `X-API-Key` header):
   - `POST /register` - Register new client (JSON body with all OsctlClient fields)
-  - `POST /unregister` - Remove client (JSON body with `id` field)
-  - `GET /clients` - List all registered clients (returns JSON map)
+  - `POST /unregister` - Remove client (JSON body with `id` field); unknown IDs return 404
+  - `GET /clients` - List all registered clients (returns JSON map; `password` always empty)
   - `GET /proxy?client_id=X&path=/endpoint` - Proxy request to registered client
 
-**Example /clients response**:
+**Example /clients response** (passwords are never exposed):
 ```json
 {
   "client1": {
     "id": "client1",
     "api_url": "http://localhost:8080",
     "username": "admin",
-    "password": "secret"
+    "password": ""
   },
   "client2": {
     "id": "client2",
     "api_url": "https://api.example.com",
     "username": "user",
-    "password": "pass"
+    "password": ""
   }
 }
 ```
@@ -64,7 +64,7 @@ go build -o central-osctl-api
 ./central-osctl-api  # Starts on port 12001 (configurable via PORT env)
 ```
 
-Port defaults to `12001` but can be configured via `PORT` environment variable - see [main.go](../main.go#L215-L220).
+Port defaults to `12001` but can be configured via `PORT` environment variable - see the end of [main.go](../main.go).
 
 ### Testing
 
@@ -72,11 +72,11 @@ Port defaults to `12001` but can be configured via `PORT` environment variable -
 go test ./...
 ```
 
-**Note**: Currently no test files exist in the codebase. To add tests, create `main_test.go` and test individual handler functions or use `httptest` for integration tests.
+Integration-style tests live in `main_test.go` (built with `httptest`), covering registration validation, authentication, password redaction on `/clients`, proxy forwarding/header handling, path traversal rejection, and persistence round-trips. Run with `-race` to check for data races.
 
 ### Docker Deployment
 
-Multi-stage build using `golang:1.20-alpine`:
+Multi-stage build using `golang:1.26-alpine` (pinned by digest) and a pinned Alpine runtime. The container runs as a non-root `app` user with `/data` as the working directory, so the default persistence file lives in `/data/clients.json`:
 ```bash
 docker build -t central-osctl-api .
 
@@ -113,7 +113,7 @@ sudo systemctl start central-osctl-api
 sudo systemctl status central-osctl-api
 ```
 
-Service runs with `GOMAXPROCS=4` and auto-restarts on failure. See [systemd/central-osctl-api.service](../systemd/central-osctl-api.service).
+Service runs with `GOMAXPROCS=4`, a dynamic non-root user, `StateDirectory=central-osctl-api` (`PERSISTENCE_FILE=/var/lib/central-osctl-api/clients.json`), and auto-restarts on failure. See [systemd/central-osctl-api.service](../systemd/central-osctl-api.service).
 
 ## Code Patterns
 
@@ -133,11 +133,11 @@ All other endpoints hold lock for entire operation duration.
 ### HTTP Request Proxying
 
 The `/proxy` endpoint:
-- Extracts `client_id` and `path` from query parameters
-- Forwards request method, body, and headers to the downstream API
-- Uses Basic Auth credentials from registered client
-- **Filters out** `client_id` and `path` before forwarding remaining query parameters
-- Copies response status, headers, and body back to caller
+- Extracts `client_id` and `path` from query parameters (rejects `..` path segments)
+- Forwards request method, body, and headers to the downstream API (hop-by-hop headers are stripped in both directions; `Content-Length` is preserved)
+- Uses Basic Auth credentials from registered client (set last, overriding any caller-supplied `Authorization` header)
+- **Filters out** `client_id` and `path` before forwarding remaining query parameters; parameters registered in the client's `api_url` act as defaults and can be overridden
+- Copies response status, headers, and body back to caller (hop-by-hop response headers stripped)
 
 Example: `GET /proxy?client_id=client1&path=/ram&sort=asc` → proxies to `{client_api_url}/ram?sort=asc`
 
@@ -147,10 +147,13 @@ Standard `http.Error()` responses with appropriate status codes - no custom erro
 
 **HTTP Status Codes**:
 - `200 OK` - Successful register/unregister, successful proxy
-- `400 Bad Request` - Missing/invalid client_id, path, or JSON body; invalid URL format
-- `401 Unauthorized` - Missing or incorrect X-API-Key header (when API_KEY is set)
-- `404 Not Found` - Client not found in proxy request
-- `500 Internal Server Error` - JSON encoding/decoding errors, downstream API connection failures
+- `400 Bad Request` - Missing/invalid client_id, path (`..` segments rejected), or JSON body; invalid URL format; empty client ID
+- `401 Unauthorized` - Missing or incorrect X-API-Key header (when API_KEY is set); enforced on all endpoints
+- `404 Not Found` - Client not found in proxy or unregister request
+- `405 Method Not Allowed` - Wrong HTTP method for the endpoint (response includes an `Allow` header)
+- `413 Request Entity Too Large` - Register/unregister body larger than 1 MiB
+- `500 Internal Server Error` - JSON encoding errors, persistence write failures, or invalid stored client URL
+- `502 Bad Gateway` - Downstream API request failure
 
 ## Configuration
 
@@ -160,14 +163,17 @@ Standard `http.Error()` responses with appropriate status codes - no custom erro
 - `API_KEY` - Optional API key for authentication via `X-API-Key` header
 
 **State Management**: 
-- Clients are persisted to JSON file (default: `clients.json`)
+- Clients are persisted to JSON file (default: `clients.json`) atomically via temp file + rename
 - Loaded automatically on startup
-- Saved after each register/unregister operation
+- Saved after each successful register/unregister operation; a failed save returns 500 and rolls the in-memory map back
 
 **Security Features**:
-- API key authentication via `X-API-Key` header (when `API_KEY` is set)
-- URL validation at registration time (must be valid http/https)
-- Query parameter filtering (removes `client_id` and `path` before proxying)
+- API key authentication via `X-API-Key` header on every endpoint (when `API_KEY` is set), using constant-time comparison
+- URL validation at registration time (must be valid http/https with a host)
+- Query parameter filtering (removes `client_id` and `path` before proxying) and `..` path-segment rejection
+- Hop-by-hop header stripping in both proxy directions
+- 1 MiB request body cap on management endpoints
+- Passwords are never returned by the API (`/clients` returns an empty `password` field)
 
 ## Critical Gotchas
 
@@ -175,7 +181,7 @@ Standard `http.Error()` responses with appropriate status codes - no custom erro
 
 ⚠️ **Client Update**: No dedicated update endpoint - use register with same ID to update. This overwrites all fields.
 
-⚠️ **Password Security**: Client passwords stored in plain text in JSON file and exposed via `/clients` endpoint. Consider access restrictions.
+⚠️ **Password Security**: Client passwords stored in plain text in the JSON file only. The `/clients` endpoint redacts them (`password` is always empty) - re-registering with the same ID is the only way to rotate a password. Keep the persistence file (0600) and its directory permissions tight.
 
 ⚠️ **No Health Checks**: Service doesn't verify if downstream APIs are reachable at registration time or periodically.
 
@@ -215,21 +221,27 @@ sudo systemctl start central-osctl-api
 - **Solution**: Check `X-API-Key` header matches `API_KEY` environment variable. Check server logs for "API Key authentication enabled".
 
 **Problem**: Persistence file not saving
-- **Solution**: Check directory permissions. Process needs write access to parent directory. Check logs for "Failed to persist clients" warnings.
+- **Solution**: Check directory permissions - the process needs write access to the directory. With the systemd unit, `StateDirectory=central-osctl-api` handles this automatically. Check logs for "Failed to persist clients" errors.
 
 **Problem**: Registration returns `400 Bad Request: invalid api_url`
 - **Solution**: Ensure URL includes scheme (`http://` or `https://`). Valid: `http://localhost:8080`, Invalid: `localhost:8080`.
 
-**Problem**: Proxy request fails with `500 Internal Server Error`
-- **Solution**: Check downstream API is reachable. Verify client credentials. Check logs for connection errors.
+**Problem**: Proxy request fails with `502 Bad Gateway`
+- **Solution**: Check downstream API is reachable. Verify client credentials. Check logs for connection errors (details are logged server-side, not returned to callers).
+
+**Problem**: Registration returns `405 Method Not Allowed`
+- **Solution**: `/register` and `/unregister` require POST, `/clients` requires GET. Check the `Allow` response header for permitted methods.
+
+**Problem**: Registration returns `413 Request Entity Too Large`
+- **Solution**: Register/unregister request bodies are capped at 1 MiB. This limit (`maxRequestBodyBytes`) can be raised in [main.go](../main.go) if needed.
 
 **Problem**: Clients lost after restart
 - **Solution**: Check `PERSISTENCE_FILE` environment variable is set. Verify file exists and has correct permissions. Check startup logs for "Loaded N clients".
 
 ## Project Conventions
 
-- **No dependencies**: Standard library only (`net/http`, `encoding/json`, `sync`, `os`)
-- **Go version**: 1.20 specified in [go.mod](../go.mod)
+- **No dependencies**: Standard library only (`net/http`, `encoding/json`, `crypto/subtle`, `os`, `sync`, `time`)
+- **Go version**: 1.25 specified in [go.mod](../go.mod)
 - **State management**: JSON file persistence (default: `clients.json`)
 - **No logging framework**: Uses `log` package for startup/warnings/errors
 - **Configuration**: Environment variables only (`PORT`, `PERSISTENCE_FILE`, `API_KEY`)

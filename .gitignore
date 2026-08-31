@@ -19,3 +19,11 @@
 
 # Go workspace file
 go.work
+
+# Build output of this module
+/central-osctl-api
+
+# Persistence file stores downstream credentials - never commit it
+clients.json
+clients.json.tmp
+clients.json.backup

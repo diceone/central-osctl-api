@@ -8,8 +8,8 @@ The `central-osctl-api` is a central orchestrator API that manages and interacts
 - **Deregister `osctl` API clients**
 - **List registered `osctl` API clients**
 - **Proxy requests to `osctl` API clients** with query parameter filtering
-- **Persistent client storage** via JSON file
-- **Optional API key authentication** for secure access
+- **Crash-safe persistent client storage** via JSON file (atomic write + rename)
+- **Optional API key authentication** on all endpoints (`/register`, `/unregister`, `/clients`, `/proxy`)
 
 ## Installation
 
@@ -94,10 +94,10 @@ curl http://localhost:12001/clients
 
 ### Proxy a Request
 
-Proxy a request to a specific `osctl` API client. Additional query parameters (except `client_id` and `path`) are forwarded to the target API.
+Proxy a request to a specific `osctl` API client. If API key authentication is enabled, include the `X-API-Key` header. Additional query parameters (except `client_id` and `path`) are forwarded to the target API; parameters already present in the registered `api_url` act as defaults and can be overridden by the proxied request.
 
 ```sh
-curl -X GET "http://localhost:12001/proxy?client_id=client1&path=/ram"
+curl -H "X-API-Key: your-secret-key" "http://localhost:12001/proxy?client_id=client1&path=/ram"
 ```
 
 Example with additional query parameters:
@@ -119,54 +119,55 @@ The `central-osctl-api` can be configured using environment variables:
 
 ### Security
 
-**API Key Authentication**: When `API_KEY` is set, all `/register` and `/unregister` requests must include an `X-API-Key` header with the correct key.
+**API Key Authentication**: Set `API_KEY` to require an `X-API-Key` header on **every** endpoint, including `/clients` and `/proxy`. Without a key, authentication is disabled and anyone who can reach the server can register clients and route requests through the proxy — setting a key is strongly recommended.
 
-**Client Persistence**: Registered clients are saved to `clients.json` (or the file specified by `PERSISTENCE_FILE`) and automatically loaded on startup. The file is created with `0600` permissions (owner read/write only).
+**Credential Exposure**: Downstream credentials are stored in the persistence file but are **never returned** by the API. The `/clients` endpoint always returns an empty `password` field.
 
-**URL Validation**: Client API URLs are validated at registration time and must be valid HTTP or HTTPS URLs.
+**Client Persistence**: Registered clients are saved to `clients.json` (or the file specified by `PERSISTENCE_FILE`) and automatically loaded on startup. The file is created with `0600` permissions (owner read/write only) and updated atomically (write to a temp file, then rename), so a crash cannot corrupt it.
+
+**Request Validation**: Client API URLs are validated at registration time and must be valid HTTP or HTTPS URLs with a host. Proxied paths must not contain `..` segments, and request bodies on management endpoints are capped at 1 MiB.
+
+**Header Hygiene**: Hop-by-hop headers (`Connection`, `Transfer-Encoding`, …) are stripped in both directions when proxying.
 
 ## Systemd Service
 
-To run the `central-osctl-api` as a systemd service:
+A ready-to-use unit file is included in the repository (`systemd/central-osctl-api.service`). It runs the service as a dynamic (non-root) user and stores client data under `/var/lib/central-osctl-api`.
 
-1. **Create a Systemd Unit File**
+1. **Build and install the binary**
 
    ```sh
-   sudo nano /etc/systemd/system/central-osctl-api.service
+   go build -o central-osctl-api
+   sudo cp central-osctl-api /usr/local/bin/
    ```
 
-2. **Add the Following Configuration**
+2. **Install, enable, and start the service**
+
+   ```sh
+   sudo cp systemd/central-osctl-api.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now central-osctl-api
+   sudo systemctl status central-osctl-api
+   ```
+
+3. **Set an API key (recommended)**
+
+   Authentication is disabled while no `API_KEY` is configured. Add one without editing the unit file:
+
+   ```sh
+   sudo systemctl edit central-osctl-api
+   ```
+
+   Add the following (use a strong secret — **do not commit real keys** to the repository):
 
    ```ini
-   [Unit]
-   Description=Central OSCTL API Service
-   After=network.target
-
    [Service]
-   Type=simple
-   ExecStart=/usr/local/bin/central-osctl-api
-   Restart=on-failure
-   Environment=GOMAXPROCS=4
-   Environment=PORT=12001
-   Environment=PERSISTENCE_FILE=/var/lib/central-osctl-api/clients.json
    Environment=API_KEY=your-secret-key-here
-
-   [Install]
-   WantedBy=multi-user.target
    ```
 
-3. **Reload Systemd, Enable, and Start the Service**
+   Then restart:
 
    ```sh
-   sudo systemctl daemon-reload
-   sudo systemctl enable central-osctl-api
-   sudo systemctl start central-osctl-api
-   ```
-
-4. **Check the Service Status**
-
-   ```sh
-   sudo systemctl status central-osctl-api
+   sudo systemctl restart central-osctl-api
    ```
 
 ## Development
@@ -203,15 +204,7 @@ export PERSISTENCE_FILE=dev-clients.json
 
 ### Testing
 
-Before running tests, make sure to set up the environment variables required for the provider configuration.
-
-```sh
-export OSCTL_API_URL=http://your-osctl-api-url
-export OSCTL_USERNAME=admin
-export OSCTL_PASSWORD=password
-```
-
-Run the tests:
+Run the test suite (no external configuration required):
 
 ```sh
 go test ./...
@@ -224,6 +217,3 @@ Contributions are welcome! Please open an issue or submit a pull request on GitH
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-```
-
-This `README.md` provides a comprehensive overview of the `central-osctl-api` project, including installation, usage, systemd service setup, and development instructions. Adjust the repository URL and other details as needed to match your actual setup.
