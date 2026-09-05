@@ -17,7 +17,7 @@ COPY . .
 RUN CGO_ENABLED=0 go build -o central-osctl-api
 
 # Start a new stage from the pinned Alpine base
-FROM alpine:3.22.1@sha256:eafc1edb577d2e9b458664a15f23ea1c370214193226069eb22921169fc7e43f
+FROM alpine:3.24.1@sha256:79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f
 
 # Run as a dedicated non-root user; /data is the default workdir so the
 # default persistence file (clients.json) lives on a writable path.
