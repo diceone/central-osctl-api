@@ -1,5 +1,5 @@
 # Use an official Golang runtime as a parent image
-FROM golang:1.26-alpine@sha256:bf9573d7c1d2b09992e4f893ea1ef30842854846bdb8ae390468f95ea6b09062 AS build
+FROM golang:1.27-alpine@sha256:f86f1a6701e3dcc445fec097a42f78b758f15950ccf032c2d3e54e2754d32fdb AS build
 
 # Set the Current Working Directory inside the container
 WORKDIR /app
